@@ -28,6 +28,7 @@ Sk.Tokenizer = function (filename, interactive, callback) {
     this.numchars = "0123456789";
     this.contstr = "";
     this.needcont = false;
+    // continued string spans multiple line
     this.contline = undefined;
     this.indents = [0];
     this.endprog = /.*/;
@@ -181,6 +182,12 @@ var PseudoExtras = group("\\\\\\r?\\n", Comment_, Triple);
 // Need to prefix with "^" as we only want to match what's next
 var PseudoToken = "^" + group(PseudoExtras, Number_, Funny, ContStr, Ident);
 
+print("PseudoExtras: " + PseudoExtras)
+print("Number_: " + Number_)
+print("Funny: " + Funny)
+print("ContStr: " + ContStr)
+print("Ident: " + Ident)
+
 
 var triple_quoted = {
     "'''"  : true, '"""': true,
@@ -247,8 +254,10 @@ Sk.Tokenizer.prototype.generateTokens = function (line) {
     var pseudomatch;
     var capos;
     var comment_token;
+    // pos is the cursor position for the next regex match
     var endmatch, pos, column, end, max;
 
+    print("Start: " + line.trim());
 
     // bnm - Move these definitions in this function otherwise test state is preserved between
     // calls on single3prog and double3prog causing weird errors with having multiple instances
@@ -298,7 +307,7 @@ Sk.Tokenizer.prototype.generateTokens = function (line) {
         if (endmatch) {
             pos = end = this.endprog.lastIndex;
             if (this.callback(Sk.Tokenizer.Tokens.T_STRING, this.contstr + line.substring(0, end),
-                this.strstart, [this.lnum, end], this.contline + line)) {
+                this.strstart, [this.lnum, end], this.contline + line)) { // this returns undefined for triple_quoted string, but not sure why
                 return 'done';
             }
             this.contstr = '';
@@ -306,6 +315,10 @@ Sk.Tokenizer.prototype.generateTokens = function (line) {
             this.contline = undefined;
         }
         else if (this.needcont && line.substring(line.length - 2) !== "\\\n" && line.substring(line.length - 3) !== "\\\r\n") {
+            /*
+             * For single_quoted string, there must have a continuation symbol, \, to span across multiple
+             * lines. If not, ERRORTOKEN is generated for parse to throw error.
+             */
             if (this.callback(Sk.Tokenizer.Tokens.T_ERRORTOKEN, this.contstr + line,
                 this.strstart, [this.lnum, line.length], this.contline)) {
                 return 'done';
@@ -322,6 +335,10 @@ Sk.Tokenizer.prototype.generateTokens = function (line) {
     }
     else if (this.parenlev === 0 && !this.continued) {
         if (!line) {
+            /*
+             * Because lines are split by newline character, the last line must be empty.
+             * We use that line to mark the end of program and finish tokenization.
+             */
             return this.doneFunc();
         }
         column = 0;
@@ -430,10 +447,14 @@ Sk.Tokenizer.prototype.generateTokens = function (line) {
                 //print("HERE:3");
                 if (this.parenlev > 0) {
                     newl = Sk.Tokenizer.Tokens.T_NL;
+                    
                 }
                 if (this.callback(newl, token, spos, epos, line)) {
                     return 'done';
                 }
+                print(Sk.Tokenizer.tokenNames[newl]);
+                print("newline");
+                print("pos:"+pos+":"+max);
             }
             else if (initial === '#') {
                 if (this.callback(Sk.Tokenizer.Tokens.T_COMMENT, token, spos, epos, line)) {
@@ -441,10 +462,14 @@ Sk.Tokenizer.prototype.generateTokens = function (line) {
                 }
             }
             else if (triple_quoted.hasOwnProperty(token)) {
+                // here is the match of PseudoExtras
+                print("triple quoted Token: " + token)
                 this.endprog = endprogs[token];
                 this.endprog.lastIndex = 0;
                 endmatch = this.endprog.test(line.substring(pos));
                 if (endmatch) {
+                    //subsequent ending quote is also on the same line.
+                    // ex: ''' this is on the same line'''
                     pos = this.endprog.lastIndex + pos;
                     token = line.substring(start, pos);
                     if (this.callback(Sk.Tokenizer.Tokens.T_STRING, token, spos, [this.lnum, pos], line)) {
@@ -452,6 +477,10 @@ Sk.Tokenizer.prototype.generateTokens = function (line) {
                     }
                 }
                 else {
+                    // subsequent ending quote spans multiple line ex:
+                    // ''' 
+                    // ....
+                    // '''
                     this.strstart = [this.lnum, start];
                     this.contstr = line.substring(start);
                     this.contline = line;
@@ -460,8 +489,16 @@ Sk.Tokenizer.prototype.generateTokens = function (line) {
             }
             else if (single_quoted.hasOwnProperty(initial) ||
                 single_quoted.hasOwnProperty(token.substring(0, 2)) ||
-                single_quoted.hasOwnProperty(token.substring(0, 3))) {
+                single_quoted.hasOwnProperty(token.substring(0, 3))) { 
+                /*
+                 * Since single_quoted string might have prefix charater before the quote character, for example r"test", ur'test', or 'test'
+                 * , we have to check the first three characters to know what kind of token it is.
+                 */
                 if (token[token.length - 1] === '\n') {
+                    /*
+                     * If the last character is newline, we have \\n this type of character at the end of the token.
+                     * This string spans multiple line and therefore we have to check the subsequent line.
+                     */ 
                     this.strstart = [this.lnum, start];
                     this.endprog = endprogs[initial] || endprogs[token[1]] || endprogs[token[2]];
                     this.contstr = line.substring(start);
